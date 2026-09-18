@@ -1,0 +1,13 @@
+openai-agents
+openai 
+pystray
+Pillow
+pynput
+sounddevice
+numpy
+scipy
+python-dotenv
+psutil
+pyautogui
+pypdf
+python-docx
