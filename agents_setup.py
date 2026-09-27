@@ -55,6 +55,8 @@ from tools import (
     read_docx,
     create_file,
     write_file,
+    create_presentation,
+    inspect_presentation,
     open_file,
 
     # General
@@ -231,7 +233,28 @@ files_agent = Agent(
         "Understand natural-language requests involving the user's files "
         "and folders. "
         "Use the appropriate file tools to accomplish the request - this "
-        "includes plain text files, PDFs, and Word documents. "
+        "includes plain text files, PDFs, Word documents, and PowerPoint "
+        "presentations. "
+        "When asked to make a slide deck or presentation, write a clear, "
+        "well-structured outline yourself (a short title/subtitle, then "
+        "one slide per key point with a heading and a few punchy bullets - "
+        "never long paragraphs) and pass it to create_presentation; the "
+        "tool handles the visual design, so focus on making the content "
+        "clear and well-organized. "
+        "Never try to build a presentation by opening Keynote/PowerPoint "
+        "and clicking or typing into it - always use create_presentation "
+        "to generate the finished .pptx file directly, then use open_file "
+        "if the user wants to see it. "
+        "create_presentation can generate and embed images - give a slide "
+        "an image_prompt. To add images to an existing deck, use "
+        "inspect_presentation to read its content, then recreate it at the "
+        "same path with image_prompts added. Never tell the user you can't "
+        "generate or add images. "
+        "To check what a deck contains (images, charts, slide content), "
+        "use inspect_presentation, which reads the file itself - never "
+        "judge from a screenshot, since an open app window can show an "
+        "out-of-date copy. "
+        "Report image counts exactly as the tool returns them. "
         "Do not require specific command phrasing. "
         "Do not claim to have modified a file unless the tool confirms it. "
         "Be concise and conversational. "
@@ -248,6 +271,8 @@ files_agent = Agent(
         read_docx,
         create_file,
         write_file,
+        create_presentation,
+        inspect_presentation,
         open_file,
     ],
 )
@@ -456,6 +481,11 @@ triage_agent = Agent(
         "If it involves applications or system controls, use the Computer "
         "Agent. "
         "If it involves files or folders, use the Files Agent. "
+        "If it involves creating a slide deck, presentation, or "
+        "PowerPoint, use the Files Agent - never the Screen Agent - even "
+        "if the user mentions Keynote or PowerPoint by name. The same goes "
+        "for checking, changing, or adding images to an existing deck, "
+        "even if the user says to look at the slides on screen. "
         "If it involves email - reading, searching, composing, sending, "
         "or replying - use the Email Agent. "
         "If it involves sending a text message or iMessage, use the "

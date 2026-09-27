@@ -786,6 +786,323 @@ def write_file(path: str, content: str) -> str:
 
 
 @function_tool
+def create_presentation(path: str, title: str, subtitle: str, slides_json: str) -> str:
+    """Create a nicely designed PowerPoint (.pptx) deck, optionally with
+    AI-generated images or native charts on individual slides.
+
+    Build the outline yourself before calling this - a short, punchy title
+    slide plus one slide per key point, each with a heading and 2-5 short
+    bullets (not long paragraphs). Add a visual to a slide only when it
+    would genuinely help - a relevant image for a concept/story slide, or a
+    chart for anything with real numbers to compare. Don't add one to every
+    slide.
+
+    Args:
+        path: Where to save the deck, e.g. "~/Desktop/Q3 Roadmap.pptx".
+        title: Title shown on the title slide.
+        subtitle: Subtitle/byline shown under the title (can be empty).
+        slides_json: JSON array of content slides, each shaped like
+            {"heading": "Slide heading", "bullets": ["point one", "point two"],
+            "image_prompt": "optional description of an image to generate for this slide",
+            "chart": {"type": "bar" | "line" | "pie", "categories": ["A", "B"], "series_name": "Sales", "values": [1, 2]}}.
+            image_prompt and chart are both optional and mutually exclusive per slide.
+    """
+    file_path = _home_path(path)
+
+    try:
+        if file_path.suffix.lower() != ".pptx":
+            file_path = file_path.with_suffix(".pptx")
+
+        import base64
+        import json
+        import shutil
+        import tempfile
+
+        from pptx import Presentation
+        from pptx.chart.data import CategoryChartData
+        from pptx.dml.color import RGBColor
+        from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
+        from pptx.enum.text import PP_ALIGN
+        from pptx.util import Emu, Pt
+
+        try:
+            slides_data = json.loads(slides_json)
+        except json.JSONDecodeError as e:
+            return f"slides_json wasn't valid JSON: {e}"
+
+        if not isinstance(slides_data, list) or not slides_data:
+            return "slides_json must be a non-empty list of {heading, bullets} slides."
+
+        # Simple, cohesive dark-navy / gold theme applied to every slide.
+        BG = RGBColor(0x0F, 0x17, 0x2A)
+        ACCENT = RGBColor(0xD4, 0xAF, 0x6A)
+        TEXT = RGBColor(0xF2, 0xF3, 0xF5)
+        MUTED = RGBColor(0xA9, 0xB2, 0xC3)
+        FONT = "Helvetica Neue"
+
+        CHART_TYPES = {
+            "bar": XL_CHART_TYPE.COLUMN_CLUSTERED,
+            "line": XL_CHART_TYPE.LINE_MARKERS,
+            "pie": XL_CHART_TYPE.PIE,
+        }
+
+        prs = Presentation()
+        prs.slide_width = Emu(12192000)   # 16:9, 13.33in
+        prs.slide_height = Emu(6858000)   # 7.5in
+        blank_layout = prs.slide_layouts[6]
+
+        tmp_dir = Path(tempfile.mkdtemp(prefix="nova_slides_"))
+        image_client = None  # lazily created only if a slide actually needs one
+        images_added = 0
+        image_errors = []
+
+        def add_background(slide):
+            fill = slide.background.fill
+            fill.solid()
+            fill.fore_color.rgb = BG
+
+        def add_accent_bar(slide):
+            bar = slide.shapes.add_shape(1, Emu(0), Emu(0), Emu(160000), prs.slide_height)
+            bar.fill.solid()
+            bar.fill.fore_color.rgb = ACCENT
+            bar.line.fill.background()
+            bar.shadow.inherit = False
+
+        def add_textbox(slide, left, top, width, height):
+            box = slide.shapes.add_textbox(Emu(left), Emu(top), Emu(width), Emu(height))
+            box.text_frame.word_wrap = True
+            return box.text_frame
+
+        def generate_image(prompt: str) -> Path | None:
+            nonlocal image_client
+            try:
+                if image_client is None:
+                    image_client = OpenAI()
+
+                result = image_client.images.generate(
+                    model="gpt-image-2.5-flare",
+                    prompt=prompt,
+                    size="1024x1024",
+                    quality="low",
+                )
+                image_bytes = base64.b64decode(result.data[0].b64_json)
+
+                image_path = tmp_dir / f"img_{len(list(tmp_dir.glob('img_*')))}.png"
+                image_path.write_bytes(image_bytes)
+                return image_path
+
+            except Exception as e:
+                # Visual is a bonus - fall back to a text-only slide, but
+                # remember why so the result doesn't overstate what landed.
+                image_errors.append(str(e))
+                return None
+
+        def add_chart(slide, chart_info, left, top, width, height):
+            chart_type = CHART_TYPES.get(str(chart_info.get("type", "bar")).lower())
+            if chart_type is None:
+                return
+
+            categories = chart_info.get("categories") or []
+            values = chart_info.get("values") or []
+            series_name = chart_info.get("series_name") or "Series 1"
+            if not categories or not values:
+                return
+
+            chart_data = CategoryChartData()
+            chart_data.categories = categories
+            chart_data.add_series(series_name, values)
+
+            graphic_frame = slide.shapes.add_chart(
+                chart_type, Emu(left), Emu(top), Emu(width), Emu(height), chart_data
+            )
+            chart = graphic_frame.chart
+            chart.has_legend = chart_type == XL_CHART_TYPE.PIE
+            if chart.has_legend:
+                chart.legend.position = XL_LEGEND_POSITION.BOTTOM
+                chart.legend.include_in_layout = False
+
+            plot = chart.plots[0]
+            plot.has_data_labels = True
+
+            for series in plot.series:
+                series.format.fill.solid()
+                series.format.fill.fore_color.rgb = ACCENT
+
+        # --- Title slide -----------------------------------------------
+        title_slide = prs.slides.add_slide(blank_layout)
+        add_background(title_slide)
+        add_accent_bar(title_slide)
+
+        tf = add_textbox(title_slide, 900000, 2700000, 10400000, 1500000)
+        p = tf.paragraphs[0]
+        p.text = title
+        p.font.size = Pt(44)
+        p.font.bold = True
+        p.font.color.rgb = TEXT
+        p.font.name = FONT
+        p.alignment = PP_ALIGN.LEFT
+
+        if subtitle:
+            tf2 = add_textbox(title_slide, 900000, 4000000, 10400000, 700000)
+            p2 = tf2.paragraphs[0]
+            p2.text = subtitle
+            p2.font.size = Pt(20)
+            p2.font.color.rgb = MUTED
+            p2.font.name = FONT
+
+        # --- Content slides ----------------------------------------------
+        for slide_info in slides_data:
+            heading = str(slide_info.get("heading", "")).strip()
+            bullets = slide_info.get("bullets", [])
+            image_prompt = slide_info.get("image_prompt")
+            chart_info = slide_info.get("chart")
+
+            slide = prs.slides.add_slide(blank_layout)
+            add_background(slide)
+            add_accent_bar(slide)
+
+            head_tf = add_textbox(slide, 900000, 500000, 10400000, 900000)
+            hp = head_tf.paragraphs[0]
+            hp.text = heading
+            hp.font.size = Pt(30)
+            hp.font.bold = True
+            hp.font.color.rgb = TEXT
+            hp.font.name = FONT
+
+            # A visual (image or chart) takes the right half; text narrows
+            # to the left half to make room. Otherwise text spans the slide.
+            has_visual = bool(image_prompt) or bool(chart_info)
+            body_width = 5300000 if has_visual else 10200000
+
+            body_tf = add_textbox(slide, 950000, 1700000, body_width, 4700000)
+            for i, bullet in enumerate(bullets):
+                bp = body_tf.paragraphs[0] if i == 0 else body_tf.add_paragraph()
+                bp.text = f"›  {bullet}"
+                bp.font.size = Pt(20)
+                bp.font.color.rgb = TEXT
+                bp.font.name = FONT
+                bp.space_after = Pt(16)
+
+            if chart_info:
+                add_chart(slide, chart_info, 6500000, 1700000, 5100000, 4400000)
+
+            elif image_prompt:
+                image_path = generate_image(image_prompt)
+                if image_path is not None:
+                    slide.shapes.add_picture(
+                        str(image_path), Emu(6500000), Emu(1700000),
+                        width=Emu(5100000), height=Emu(4400000),
+                    )
+                    images_added += 1
+
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        prs.save(str(file_path))
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        result = f"Created the presentation at {file_path} with {len(slides_data) + 1} slides"
+        if images_added or image_errors:
+            result += f" and {images_added} embedded image(s)"
+        result += "."
+        if image_errors:
+            result += (
+                f" {len(image_errors)} image(s) failed to generate and those "
+                f"slides are text-only. First error: {image_errors[0]}"
+            )
+        return result
+
+    except Exception as e:
+        return f"Couldn't create the presentation: {e}"
+
+
+@function_tool
+def inspect_presentation(path: str) -> str:
+    """Report what's actually inside a PowerPoint (.pptx) file, slide by
+    slide: heading, number of bullets, and any embedded images or charts.
+
+    Use this - not a screenshot - to check whether a deck contains images,
+    charts, or particular content. An app window can show an out-of-date
+    copy; this reads the file on disk.
+
+    Args:
+        path: Path to the .pptx file.
+    """
+    file_path = _home_path(path)
+
+    try:
+        if not file_path.exists():
+            return f"File does not exist: {file_path}"
+
+        from pptx import Presentation
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+        prs = Presentation(str(file_path))
+        lines = []
+        total_images = 0
+        total_charts = 0
+
+        for i, slide in enumerate(prs.slides, start=1):
+            texts = [
+                shape.text_frame.text.strip()
+                for shape in slide.shapes
+                if shape.has_text_frame and shape.text_frame.text.strip()
+            ]
+            images = sum(1 for shape in slide.shapes if shape.shape_type == MSO_SHAPE_TYPE.PICTURE)
+            charts = sum(1 for shape in slide.shapes if getattr(shape, "has_chart", False))
+            total_images += images
+            total_charts += charts
+
+            heading = texts[0].splitlines()[0] if texts else "(no text)"
+            bullets = sum(len(t.splitlines()) for t in texts[1:])
+            lines.append(
+                f"Slide {i}: {heading} - {bullets} bullet(s), "
+                f"{images} image(s), {charts} chart(s)"
+            )
+
+        summary = (
+            f"{file_path.name}: {len(prs.slides)} slides, "
+            f"{total_images} embedded image(s), {total_charts} chart(s)."
+        )
+        return summary + "\n" + "\n".join(lines)
+
+    except Exception as e:
+        return f"Couldn't inspect the presentation: {e}"
+
+
+def _close_stale_keynote_copy(file_path: Path) -> str | None:
+    """If Keynote already has this deck open, close that copy so `open`
+    re-imports the current file from disk instead of just re-focusing an
+    out-of-date window. Returns a message if it was left open because it
+    has unsaved changes."""
+    names = [file_path.name, file_path.stem]
+    conditions = " or ".join(
+        'name is "' + n.replace("\\", "\\\\").replace('"', '\\"') + '"' for n in names
+    )
+
+    script = f"""
+    if application "Keynote" is running then
+        tell application "Keynote"
+            set matches to (every document whose {conditions})
+            repeat with d in matches
+                if modified of d then return "modified"
+            end repeat
+            repeat with d in matches
+                close d saving no
+            end repeat
+        end tell
+    end if
+    return "ok"
+    """
+
+    if _run_osascript(script) == "modified":
+        return (
+            f"Keynote already has {file_path.name} open with unsaved changes, "
+            "so it may be showing an older version. Ask the user whether to "
+            "close it without saving so the latest file can be reopened."
+        )
+    return None
+
+
+@function_tool
 def open_file(path: str) -> str:
     """Open a file using the user's default Mac application.
 
@@ -797,6 +1114,11 @@ def open_file(path: str) -> str:
     try:
         if not file_path.exists():
             return f"File does not exist: {file_path}"
+
+        if file_path.suffix.lower() in (".pptx", ".ppt", ".key"):
+            warning = _close_stale_keynote_copy(file_path)
+            if warning:
+                return warning
 
         subprocess.run(["open", str(file_path)], check=True)
 

@@ -11,3 +11,4 @@ psutil
 pyautogui
 pypdf
 python-docx
+python-pptx
